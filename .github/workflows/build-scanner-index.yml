@@ -1,0 +1,101 @@
+name: Build Android scanner index
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-scanner-index-build
+  cancel-in-progress: false
+
+jobs:
+  catalogue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scanner-index/build_index.py catalogue --output work/scanner-card-catalogue-v2.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scanner-catalogue
+          path: work/scanner-card-catalogue-v2.tsv
+          retention-days: 3
+
+  signatures:
+    runs-on: ubuntu-latest
+    needs: catalogue
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'Pillow>=10,<13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: scanner-catalogue
+          path: work
+      - name: Create reference fingerprints
+        run: |
+          python scanner-index/build_index.py shard \
+            --catalogue work/scanner-card-catalogue-v2.tsv \
+            --shard-index ${{ matrix.shard }} --shard-count 8 --workers 6 \
+            --output work/scanner-signatures-shard-${{ matrix.shard }}.tsv \
+            --failures work/scanner-failures-shard-${{ matrix.shard }}.tsv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scanner-shard-${{ matrix.shard }}
+          path: |
+            work/scanner-signatures-shard-${{ matrix.shard }}.tsv
+            work/scanner-failures-shard-${{ matrix.shard }}.tsv
+          retention-days: 3
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [catalogue, signatures]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: scanner-catalogue
+          path: work
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: scanner-shard-*
+          path: work
+          merge-multiple: true
+      - name: Assemble and verify complete index
+        run: |
+          python scanner-index/build_index.py assemble \
+            --catalogue work/scanner-card-catalogue-v2.tsv \
+            --shard-dir work \
+            --output work/scanner-index-v2.zip
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="scanner-v2-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" \
+            work/scanner-index-v2.zip \
+            work/scanner-index-v2.sha256 \
+            work/scanner-index-v2-manifest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Poké-Logger scanner database $TAG" \
+            --notes "Verified TCGdex English reference-card signatures. Indexed coverage is NOT recognition accuracy." \
+            --latest
