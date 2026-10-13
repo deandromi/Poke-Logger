@@ -1,0 +1,2 @@
+Start initial Android scanner index build.
+This file triggers the one-time GitHub Actions run.
